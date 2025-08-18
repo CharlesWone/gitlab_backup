@@ -213,15 +213,24 @@ clone_project() {
     local project_path="$2"
     local project_url="$3"
     local group_dir="$4"
+    local current="$5"
+    local total="$6"
     
     local project_dir="${group_dir}/${project_path}"
     
+    # 显示进度
+    local progress=""
+    if [[ -n "$total" && "$total" -gt 0 ]]; then
+        progress="[${current}/${total}] "
+    fi
+    
     if [[ -d "$project_dir" ]]; then
-        log_warning "项目 '$project_name' 已存在，跳过克隆"
+        log_warning "${progress}项目 '$project_name' 已存在，跳过克隆"
+        ((SKIPPED_PROJECTS++))
         return 0
     fi
     
-    log_info "克隆项目: $project_name"
+    log_info "${progress}克隆项目: $project_name"
     
     # 构建带token的URL
     local token_url
@@ -239,10 +248,12 @@ clone_project() {
     
     # 克隆项目
     if git clone --mirror "$token_url" "$project_dir" 2>/dev/null; then
-        log_success "成功克隆项目: $project_name"
+        log_success "${progress}成功克隆项目: $project_name"
+        ((CLONED_PROJECTS++))
         return 0
     else
-        log_error "克隆项目 '$project_name' 失败"
+        log_error "${progress}克隆项目 '$project_name' 失败"
+        ((FAILED_PROJECTS++))
         return 1
     fi
 }
@@ -251,6 +262,7 @@ clone_project() {
 process_group_projects() {
     local groups="$1"
     local group_count=$(echo "$groups" | jq 'length')
+    local current_project=0
     
     for ((i=0; i<group_count; i++)); do
         local group=$(echo "$groups" | jq -r ".[$i]")
@@ -269,12 +281,13 @@ process_group_projects() {
         local project_count=$(echo "$projects" | jq 'length')
         
         for ((j=0; j<project_count; j++)); do
+            ((current_project++))
             local project=$(echo "$projects" | jq -r ".[$j]")
             local project_name=$(echo "$project" | jq -r '.name')
             local project_path=$(echo "$project" | jq -r '.path')
             local project_url=$(echo "$project" | jq -r '.http_url_to_repo')
             
-            clone_project "$project_name" "$project_path" "$project_url" "$group_dir"
+            clone_project "$project_name" "$project_path" "$project_url" "$group_dir" "$current_project" "$TOTAL_PROJECTS"
         done
     done
 }
@@ -317,20 +330,38 @@ process_ungrouped_projects() {
     local ungrouped_dir="${OUTPUT_DIR}/未分组"
     mkdir -p "$ungrouped_dir"
     
+    # 计算已处理的群组项目数
+    local processed_group_projects=0
+    for ((i=0; i<group_count; i++)); do
+        local group_id=$(echo "$groups" | jq -r ".[$i].id")
+        local group_projects=$(api_request "groups/${group_id}/projects")
+        local project_count=$(echo "$group_projects" | jq 'length')
+        processed_group_projects=$((processed_group_projects + project_count))
+    done
+    
     # 克隆未分组的项目
     local project_count=$(echo "$ungrouped_projects" | jq 'length')
     for ((i=0; i<project_count; i++)); do
+        ((processed_group_projects++))
         local project=$(echo "$ungrouped_projects" | jq -r ".[$i]")
         local project_name=$(echo "$project" | jq -r '.name')
         local project_path=$(echo "$project" | jq -r '.path')
         local project_url=$(echo "$project" | jq -r '.http_url_to_repo')
         
-        clone_project "$project_name" "$project_path" "$project_url" "$ungrouped_dir"
+        clone_project "$project_name" "$project_path" "$project_url" "$ungrouped_dir" "$processed_group_projects" "$TOTAL_PROJECTS"
     done
 }
 
 # 主函数
 main() {
+    # 初始化统计变量
+    TOTAL_GROUPS=0
+    TOTAL_PROJECTS=0
+    CLONED_PROJECTS=0
+    SKIPPED_PROJECTS=0
+    FAILED_PROJECTS=0
+    START_TIME=$(date +%s)
+    
     log_info "开始GitLab备份..."
     
     # 解析参数
@@ -350,6 +381,37 @@ main() {
     
     # 获取所有群组
     local groups=$(get_groups)
+    TOTAL_GROUPS=$(echo "$groups" | jq 'length')
+    
+    # 统计总项目数
+    local total_projects=0
+    local group_count=$(echo "$groups" | jq 'length')
+    for ((i=0; i<group_count; i++)); do
+        local group_id=$(echo "$groups" | jq -r ".[$i].id")
+        local group_projects=$(api_request "groups/${group_id}/projects")
+        local project_count=$(echo "$group_projects" | jq 'length')
+        total_projects=$((total_projects + project_count))
+    done
+    
+    if [[ "$INCLUDE_UNGROUPED" == "true" ]]; then
+        local all_projects=$(get_all_projects)
+        local grouped_ids="[]"
+        for ((i=0; i<group_count; i++)); do
+            local group_id=$(echo "$groups" | jq -r ".[$i].id")
+            local group_projects=$(api_request "groups/${group_id}/projects")
+            local project_ids=$(echo "$group_projects" | jq -r '.[].id')
+            for project_id in $project_ids; do
+                grouped_ids=$(echo "$grouped_ids" | jq --arg id "$project_id" '. += [$id]')
+            done
+        done
+        local ungrouped_projects=$(echo "$all_projects" | jq --argjson grouped "$grouped_ids" \
+            'map(select(.id | tostring | IN($grouped[] | tostring) | not))')
+        local ungrouped_count=$(echo "$ungrouped_projects" | jq 'length')
+        total_projects=$((total_projects + ungrouped_count))
+    fi
+    
+    TOTAL_PROJECTS=$total_projects
+    log_info "总计需要处理 $TOTAL_PROJECTS 个项目"
     
     # 处理群组项目
     process_group_projects "$groups"
@@ -357,8 +419,26 @@ main() {
     # 处理未分组的项目
     process_ungrouped_projects
     
+    # 显示最终统计信息
+    show_final_stats
+}
+
+# 显示最终统计信息
+show_final_stats() {
+    local end_time=$(date +%s)
+    local duration=$((end_time - START_TIME))
+    
+    echo
+    log_info "============================================================"
     log_success "GitLab备份完成!"
+    log_info "总群组数: $TOTAL_GROUPS"
+    log_info "总项目数: $TOTAL_PROJECTS"
+    log_info "成功克隆: $CLONED_PROJECTS"
+    log_info "跳过项目: $SKIPPED_PROJECTS"
+    log_info "失败项目: $FAILED_PROJECTS"
+    log_info "总耗时: ${duration} 秒"
     log_info "备份目录: $OUTPUT_DIR"
+    log_info "============================================================"
 }
 
 # 运行主函数

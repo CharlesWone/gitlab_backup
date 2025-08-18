@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import argparse
 import logging
+import time
 
 # 配置日志
 logging.basicConfig(
@@ -44,6 +45,14 @@ class GitLabBackup:
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
         }
+        
+        # 进度统计
+        self.total_groups = 0
+        self.total_projects = 0
+        self.cloned_projects = 0
+        self.skipped_projects = 0
+        self.failed_projects = 0
+        self.start_time = None
         
         # 创建输出目录
         self.output_dir.mkdir(exist_ok=True)
@@ -99,7 +108,8 @@ class GitLabBackup:
         """
         logger.info("正在获取群组列表...")
         groups = self._make_request('groups')
-        logger.info(f"找到 {len(groups)} 个群组")
+        self.total_groups = len(groups)
+        logger.info(f"找到 {self.total_groups} 个群组")
         return groups
     
     def get_projects(self, group_id: Optional[int] = None) -> List[Dict]:
@@ -135,13 +145,15 @@ class GitLabBackup:
         branches = self._make_request(f'projects/{project_id}/repository/branches')
         return branches
     
-    def clone_project(self, project: Dict, group_name: str = "其他") -> bool:
+    def clone_project(self, project: Dict, group_name: str = "其他", current: int = 0, total: int = 0) -> bool:
         """
         克隆项目及其所有分支
         
         Args:
             project: 项目信息
             group_name: 群组名称
+            current: 当前项目序号
+            total: 总项目数
             
         Returns:
             是否成功
@@ -157,13 +169,20 @@ class GitLabBackup:
         # 项目目录
         project_dir = group_dir / project_path
         
+        # 显示进度
+        if total > 0:
+            progress = f"[{current}/{total}] "
+        else:
+            progress = ""
+        
         if project_dir.exists():
-            logger.info(f"项目 {project_name} 已存在，跳过克隆")
+            logger.info(f"{progress}项目 {project_name} 已存在，跳过克隆")
+            self.skipped_projects += 1
             return True
             
         try:
             # 克隆项目
-            logger.info(f"正在克隆项目: {project_name}")
+            logger.info(f"{progress}正在克隆项目: {project_name}")
             
             # 替换URL中的用户名和密码为访问令牌
             if '@' in project_url:
@@ -184,14 +203,17 @@ class GitLabBackup:
             )
             
             if result.returncode != 0:
-                logger.error(f"克隆项目 {project_name} 失败: {result.stderr}")
+                logger.error(f"{progress}克隆项目 {project_name} 失败: {result.stderr}")
+                self.failed_projects += 1
                 return False
                 
-            logger.info(f"成功克隆项目: {project_name}")
+            logger.info(f"{progress}成功克隆项目: {project_name}")
+            self.cloned_projects += 1
             return True
             
         except Exception as e:
-            logger.error(f"克隆项目 {project_name} 时发生错误: {e}")
+            logger.error(f"{progress}克隆项目 {project_name} 时发生错误: {e}")
+            self.failed_projects += 1
             return False
     
     def backup_all(self, include_ungrouped: bool = True):
@@ -201,13 +223,33 @@ class GitLabBackup:
         Args:
             include_ungrouped: 是否包含未分组的项目
         """
+        self.start_time = time.time()
         logger.info("开始GitLab备份...")
         
         # 获取所有群组
         groups = self.get_groups()
         group_dict = {group['id']: group for group in groups}
         
+        # 统计总项目数
+        total_projects = 0
+        for group in groups:
+            group_projects = self.get_projects(group['id'])
+            total_projects += len(group_projects)
+        
+        if include_ungrouped:
+            all_projects = self.get_projects()
+            grouped_project_ids = set()
+            for group in groups:
+                group_projects = self.get_projects(group['id'])
+                grouped_project_ids.update(project['id'] for project in group_projects)
+            ungrouped_projects = [p for p in all_projects if p['id'] not in grouped_project_ids]
+            total_projects += len(ungrouped_projects)
+        
+        self.total_projects = total_projects
+        logger.info(f"总计需要处理 {self.total_projects} 个项目")
+        
         # 备份群组项目
+        current_project = 0
         for group in groups:
             group_id = group['id']
             group_name = group['name']
@@ -219,7 +261,8 @@ class GitLabBackup:
             projects = self.get_projects(group_id)
             
             for project in projects:
-                self.clone_project(project, group_path)
+                current_project += 1
+                self.clone_project(project, group_path, current_project, self.total_projects)
         
         # 备份未分组的项目
         if include_ungrouped:
@@ -237,9 +280,27 @@ class GitLabBackup:
             logger.info(f"找到 {len(ungrouped_projects)} 个未分组的项目")
             
             for project in ungrouped_projects:
-                self.clone_project(project, "未分组")
+                current_project += 1
+                self.clone_project(project, "未分组", current_project, self.total_projects)
         
+        # 显示最终统计信息
+        self._show_final_stats()
+        
+    def _show_final_stats(self):
+        """显示最终统计信息"""
+        end_time = time.time()
+        duration = end_time - self.start_time
+        
+        logger.info("=" * 60)
         logger.info("GitLab备份完成!")
+        logger.info(f"总群组数: {self.total_groups}")
+        logger.info(f"总项目数: {self.total_projects}")
+        logger.info(f"成功克隆: {self.cloned_projects}")
+        logger.info(f"跳过项目: {self.skipped_projects}")
+        logger.info(f"失败项目: {self.failed_projects}")
+        logger.info(f"总耗时: {duration:.2f} 秒")
+        logger.info(f"备份目录: {self.output_dir}")
+        logger.info("=" * 60)
 
 def main():
     parser = argparse.ArgumentParser(description='GitLab项目备份工具')
