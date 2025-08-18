@@ -1,0 +1,14 @@
+# GitLab备份配置文件示例
+# 复制此文件为 config.env 并修改相应的值
+
+# GitLab服务器URL
+GITLAB_URL=https://gitlab.com
+
+# GitLab访问令牌 (需要 read_api 和 read_repository 权限)
+ACCESS_TOKEN=your_access_token_here
+
+# 输出目录
+OUTPUT_DIR=gitlab_backup
+
+# 是否包含未分组的项目 (true/false)
+INCLUDE_UNGROUPED=true
