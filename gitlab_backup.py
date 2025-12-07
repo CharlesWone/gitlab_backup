@@ -193,6 +193,8 @@ class GitLabBackup:
                 # 如果URL不包含用户名，添加token
                 url_parts = project_url.split('://')
                 token_url = f"{url_parts[0]}://oauth2:{self.access_token}@{url_parts[1]}"
+
+            token_url = token_url.replace("gitlab.navclips.com", "47.107.158.127")
             
             # 执行git clone
             result = subprocess.run(
