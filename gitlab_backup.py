@@ -198,7 +198,7 @@ class GitLabBackup:
             
             # 执行git clone
             result = subprocess.run(
-                ['git', 'clone', '--mirror', token_url, str(project_dir)],
+                ['git', 'clone', token_url, str(project_dir)],
                 capture_output=True,
                 text=True,
                 cwd=str(group_dir)
